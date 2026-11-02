@@ -583,7 +583,10 @@ async function onMessage(tg, msg) {
 
     if (cmd === '/start' || cmd === '/help') return void await reply(helpText());
     if (cmd === '/id') return void await reply('tg user id: ' + uid);
-    if (cmd === '/count') return void await reply('QQ 收藏表情总数：' + (await favList()).length);
+    if (cmd === '/count') {
+      const modeText = stickerMode === 'group' ? 'group（发贴纸自动导入整包）' : 'single（发贴纸只存单张）';
+      return void await reply('QQ 收藏表情总数：' + (await favList()).length + '\n当前模式：' + modeText);
+    }
     if (cmd === '/delete_all' || cmd === '/deleteall') {
       const arg = (text.split(/\s+/)[1] || '').toLowerCase();
       if (arg !== 'confirm') {
