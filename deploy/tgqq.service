@@ -1,0 +1,23 @@
+[Unit]
+Description=tg2qq-sticker - Telegram stickers to QQ favorites
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 改成你的部署目录
+WorkingDirectory=/root/tgqq
+# 注意：TG Bot API 在部分网络环境下必须走代理，按需保留；不需要就删掉下面四行
+Environment=HTTPS_PROXY=http://127.0.0.1:7890
+Environment=HTTP_PROXY=http://127.0.0.1:7890
+Environment=NO_PROXY=localhost,127.0.0.1,::1
+Environment=NODE_USE_ENV_PROXY=1
+ExecStart=/usr/bin/node /root/tgqq/bridge.mjs
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tgqq
+
+[Install]
+WantedBy=multi-user.target

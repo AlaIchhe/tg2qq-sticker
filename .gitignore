@@ -1,0 +1,15 @@
+# 本地运行状态与凭据，禁止提交
+token
+config.json
+state.json
+seen.json
+tmp/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# 编辑器/系统
+.DS_Store
+*.swp

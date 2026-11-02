@@ -1,0 +1,13 @@
+{
+  "onebot": {
+    "ws": "ws://127.0.0.1:3001"
+  },
+  "allowUsers": [],
+  "format": "gif",
+  "size": 240,
+  "fps": 20,
+  "descMode": "emoji",
+  "favHostDir": "/root/work/wakaba/tgqq-tmp",
+  "favContainerDir": "/data/wakaba/tgqq-tmp",
+  "lottiePython": "/opt/lottie-venv/bin/python"
+}
