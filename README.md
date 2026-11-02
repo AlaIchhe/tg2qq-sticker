@@ -101,6 +101,7 @@ journalctl -u tgqq -f
 | 直接发贴纸 / 图片 | 存这一张（等同 `/single`） |
 | 回复贴纸发 `/single` | 只存被回复的那一张 |
 | 回复贴纸发 `/group` 或 `/pack` | 导入它所在的整个表情包 |
+| 发 `/group t.me/addstickers/包名` 或 `/group 包名` | 直接按链接/包名导入整包（不用回复） |
 | `/count` | 当前收藏数量 |
 | `/del` | 删除最近由本 bot 添加的一张（不会动其他收藏） |
 | `/delete_all` | 清空收藏里的**全部**表情；需在 60 秒内再发 `/delete_all confirm` 确认，不可恢复 |

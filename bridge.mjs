@@ -114,7 +114,7 @@ const ob = new OneBot(cfg.onebot.ws);
 function makeTG(token) {
   const base = 'https://api.telegram.org/bot' + token;
   async function raw(method, params) {
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 6; i++) {
       try {
         const r = await fetch(base + '/' + method, {
           method: 'POST', headers: { 'content-type': 'application/json' },
@@ -124,6 +124,12 @@ function makeTG(token) {
         if (!j.ok) {
           if (j.error_code === 401) throw new Error('token 无效 (401)');
           if (j.error_code === 409) { await sleep(3000); continue; }
+          if (j.error_code === 429) {
+            const wait = Math.min(60, (j.parameters && j.parameters.retry_after) || 3);
+            log('[tg] 429 rate limited, retry in ' + wait + 's');
+            await sleep(wait * 1000);
+            continue;
+          }
           throw new Error(method + ': ' + (j.description || JSON.stringify(j)));
         }
         return j.result;
@@ -313,6 +319,16 @@ async function deleteAllFavorites() {
 }
 
 // ---------------- 交互 ----------------
+function parsePackArg(text) {
+  const arg = text.split(/\s+/).slice(1).join(' ').trim();
+  if (!arg) return '';
+  const link = arg.match(/t\.me\/addstickers\/([A-Za-z0-9_]+)/i);
+  if (link) return link[1];
+  const bare = arg.match(/^([A-Za-z][A-Za-z0-9_]{2,})$/);
+  if (bare) return bare[1];
+  return '';
+}
+
 let deleteAllArmedAt = 0;
 function helpText() {
   return [
@@ -327,7 +343,8 @@ function helpText() {
     '单张 / 整包：',
     '  直接发贴纸                → 存这一张（等同 /single）',
     '  回复贴纸发 /single        → 只存被回复的那一张',
-    '  回复贴纸发 /group 或 /pack → 把这个贴纸所在的整个表情包全部存进来',
+    '  回复贴纸发 /group 或 /pack → 导入这个贴纸所在的整个表情包',
+    '  或直接发 /group t.me/addstickers/包名（也可以只发包名）',
     '（single / group 不带斜杠也认）',
     '',
     'QQ 只认 GIF 的帧延时，APNG 会被按固定短间隔播放（变快），所以动态贴纸一律转 GIF 50fps',
@@ -416,8 +433,10 @@ async function saveSticker(tg, st, reply) {
 }
 
 async function savePack(tg, setName, reply) {
+  log('[pack] import start:', setName);
   const set = await tg.api('getStickerSet', { name: setName });
   const list = set.stickers || [];
+  log('[pack]', setName, 'title=', set.title || '?', 'stickers=', list.length);
   if (!list.length) return reply('这个表情包里没有贴纸。');
 
   const status = await reply('开始导入「' + set.title + '」，共 ' + list.length + ' 张…\n（动态贴纸要逐张渲染，可能需要几分钟）');
@@ -516,16 +535,28 @@ async function onMessage(tg, msg) {
     if (msg.sticker) return void await serialize(() => saveSticker(tg, msg.sticker, reply));
     if (msg.photo || msg.document || msg.animation) return void await serialize(() => saveImage(tg, msg, reply));
 
+    const replied = msg.reply_to_message || msg.external_reply || null;
+    const repliedSticker = replied && replied.sticker ? replied.sticker : null;
+
     if (cmd === '/group' || cmd === '/pack') {
-      const st = msg.reply_to_message && msg.reply_to_message.sticker;
-      if (!st) return void await reply('用法：回复一张贴纸，然后发 /group（或 /pack），导入它所在的整个表情包。');
-      if (!st.set_name) return void await reply('这张贴纸不属于公开表情包（可能是自定义表情），无法整包导入。');
-      return void await serialize(() => savePack(tg, st.set_name, reply));
+      const argName = parsePackArg(text);
+      let setName = argName;
+      if (!setName && repliedSticker) setName = repliedSticker.set_name || '';
+      if (!setName) {
+        return void await reply([
+          '整包导入的三种用法：',
+          '1) 回复一张贴纸，再发 /group',
+          '2) 直接发 /group t.me/addstickers/包名',
+          '3) 直接发 /group 包名',
+          '',
+          '（必须是公开贴纸包；自定义表情没有 set_name，导不了）',
+        ].join('\n'));
+      }
+      return void await serialize(() => savePack(tg, setName, reply));
     }
     if (cmd === '/single') {
-      const st = msg.reply_to_message && msg.reply_to_message.sticker;
-      if (!st) return void await reply('用法：回复一张贴纸，然后发 /single。');
-      return void await serialize(() => saveSticker(tg, st, reply));
+      if (!repliedSticker) return void await reply('用法：回复一张贴纸，然后发 /single。');
+      return void await serialize(() => saveSticker(tg, repliedSticker, reply));
     }
 
     if (cmd === '/start' || cmd === '/help') return void await reply(helpText());
@@ -598,4 +629,4 @@ process.on('SIGINT', () => process.exit(0));
 const invokedDirectly = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname);
 if (invokedDirectly) main();
 
-export { webmToApng, tgsToApng, webmToGif, tgsToGif, toPng, evalAdd, favList, deleteNewest, deleteFavorites, deleteAllFavorites, makeTG, md5hex, saveSticker, savePack, saveOne, formatOne, setDesc };
+export { webmToApng, tgsToApng, webmToGif, tgsToGif, toPng, evalAdd, favList, deleteNewest, deleteFavorites, deleteAllFavorites, makeTG, md5hex, saveSticker, savePack, saveOne, formatOne, setDesc, parsePackArg };
