@@ -55,6 +55,8 @@ const DEFAULTS = {
   fps: 20,
   descMode: 'emoji',
   format: 'gif',
+  // 收到贴纸时的默认模式：single=只存这一张，group=导入整个表情包
+  mode: 'single',
   // 收藏上传用的临时目录：宿主机路径 + NapCat 容器内能看到同一目录的路径
   favHostDir: '/root/work/wakaba/tgqq-tmp',
   favContainerDir: '/data/wakaba/tgqq-tmp',
@@ -67,6 +69,7 @@ const FAV_HOST_DIR = cfg.favHostDir;
 const FAV_CONTAINER_DIR = cfg.favContainerDir;
 const VENV_PY = cfg.lottiePython;
 const state = Object.assign({ offset: 0 }, loadJSON(STATE_FILE, {}));
+let stickerMode = cfg.mode === 'group' ? 'group' : 'single';
 const seen = loadJSON(SEEN_FILE, {});
 
 let chain = Promise.resolve();
@@ -334,17 +337,18 @@ function helpText() {
   return [
     'TG → QQ 收藏表情',
     '',
-    '发贴纸 / 图片 → 直接存进 QQ 收藏表情（不往 QQ 发任何消息）',
+    '发贴纸 → 按当前模式存进 QQ 收藏表情（不往 QQ 发任何消息）',
+    '  single 模式：每张单独存；group 模式：自动导入整包',
+    '  /single 或 /group 切换模式（会记住）',
     '  静态 .webp  → PNG',
     '  动态 .webm  → GIF 240×240 50fps（保留透明）',
     '  动态 .tgs   → rlottie 渲染成 GIF（保留透明）',
     '相同内容只会存一份，重复发会被识别出来。',
     '',
-    '单张 / 整包：',
-    '  直接发贴纸                → 存这一张（等同 /single）',
-    '  回复贴纸发 /single        → 只存被回复的那一张',
-    '  回复贴纸发 /group 或 /pack → 导入这个贴纸所在的整个表情包',
-    '  或直接发 /group t.me/addstickers/包名（也可以只发包名）',
+    '模式：',
+    '  /single → 之后发贴纸，只存这一张（默认）',
+    '  /group  → 之后发贴纸，自动导入它所在的整个表情包',
+    '  /group t.me/addstickers/包名 → 立即导入指定包（同时切到 group）',
     '（single / group 不带斜杠也认）',
     '',
     'QQ 只认 GIF 的帧延时，APNG 会被按固定短间隔播放（变快），所以动态贴纸一律转 GIF 50fps',
@@ -532,31 +536,49 @@ async function onMessage(tg, msg) {
   }
 
   try {
-    if (msg.sticker) return void await serialize(() => saveSticker(tg, msg.sticker, reply));
+    if (msg.sticker) {
+      if (stickerMode === 'group') {
+        if (!msg.sticker.set_name) {
+          return void await reply('当前是 group 模式，但这张贴纸不在公开表情包里（自定义表情没有 set_name），导不了整包。\n发 /single 切回单张模式。');
+        }
+        return void await serialize(() => savePack(tg, msg.sticker.set_name, reply));
+      }
+      return void await serialize(() => saveSticker(tg, msg.sticker, reply));
+    }
     if (msg.photo || msg.document || msg.animation) return void await serialize(() => saveImage(tg, msg, reply));
 
     const replied = msg.reply_to_message || msg.external_reply || null;
     const repliedSticker = replied && replied.sticker ? replied.sticker : null;
 
+    function setMode(next) {
+      stickerMode = next;
+      cfg.mode = next;
+      saveJSON(CONFIG_FILE, cfg);
+    }
+
     if (cmd === '/group' || cmd === '/pack') {
-      const argName = parsePackArg(text);
-      let setName = argName;
-      if (!setName && repliedSticker) setName = repliedSticker.set_name || '';
-      if (!setName) {
+      setMode('group');
+      const argName = parsePackArg(text) || (repliedSticker && repliedSticker.set_name) || '';
+      if (!argName) {
         return void await reply([
-          '整包导入的三种用法：',
-          '1) 回复一张贴纸，再发 /group',
-          '2) 直接发 /group t.me/addstickers/包名',
-          '3) 直接发 /group 包名',
+          '✅ 已切到 group 模式',
+          '之后你发任意一张贴纸，我都会把它所在的**整个表情包**导进收藏（已存在的自动跳过）。',
           '',
-          '（必须是公开贴纸包；自定义表情没有 set_name，导不了）',
+          '想立即导某个包，也可以：/group t.me/addstickers/包名',
+          '切回单张：/single',
         ].join('\n'));
       }
-      return void await serialize(() => savePack(tg, setName, reply));
+      return void await serialize(() => savePack(tg, argName, reply));
     }
     if (cmd === '/single') {
-      if (!repliedSticker) return void await reply('用法：回复一张贴纸，然后发 /single。');
-      return void await serialize(() => saveSticker(tg, repliedSticker, reply));
+      setMode('single');
+      if (repliedSticker) return void await serialize(() => saveSticker(tg, repliedSticker, reply));
+      return void await reply([
+        '✅ 已切到 single 模式',
+        '之后你发贴纸，只单独存这一张。',
+        '',
+        '切到整包：/group',
+      ].join('\n'));
     }
 
     if (cmd === '/start' || cmd === '/help') return void await reply(helpText());

@@ -98,10 +98,10 @@ journalctl -u tgqq -f
 
 | 命令 | 作用 |
 |---|---|
-| 直接发贴纸 / 图片 | 存这一张（等同 `/single`） |
-| 回复贴纸发 `/single` | 只存被回复的那一张 |
-| 回复贴纸发 `/group` 或 `/pack` | 导入它所在的整个表情包 |
-| 发 `/group t.me/addstickers/包名` 或 `/group 包名` | 直接按链接/包名导入整包（不用回复） |
+| 直接发贴纸 / 图片 | 按当前模式处理：single 存这一张，group 自动导入整包 |
+| `/single` | 切到 **single 模式**：之后每张贴纸都单独存（默认模式，会持久化） |
+| `/group` | 切到 **group 模式**：之后每发一张贴纸，自动导入它所在的整个表情包 |
+| `/group t.me/addstickers/包名` | 立即导入指定包，并切到 group 模式 |
 | `/count` | 当前收藏数量 |
 | `/del` | 删除最近由本 bot 添加的一张（不会动其他收藏） |
 | `/delete_all` | 清空收藏里的**全部**表情；需在 60 秒内再发 `/delete_all confirm` 确认，不可恢复 |
