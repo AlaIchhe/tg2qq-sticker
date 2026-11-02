@@ -282,7 +282,38 @@ async function deleteNewest() {
   return { status: 'deleted', md5: (target.md5 || '').toUpperCase(), resId: target.resId, count: after.length };
 }
 
+async function deleteFavorites(ids) {
+  let deleted = 0;
+  const failed = [];
+  for (let i = 0; i < ids.length; i += 40) {
+    const batch = ids.slice(i, i + 40);
+    const r = await ob.call('delete_custom_face', { ids: batch }, 120000);
+    if (r.retcode === 0) deleted += batch.length;
+    else failed.push((r.message || r.wording || ('retcode ' + r.retcode)));
+    await sleep(600); // 给 QQ 侧留点喘息时间
+  }
+  await sleep(800);
+  const after = await favList();
+  return { deleted, failed, count: after.length };
+}
+
+async function deleteAllFavorites() {
+  const list = await favList();
+  const ids = list.map(x => x.resId).filter(Boolean);
+  if (!ids.length) return { status: 'empty', count: 0 };
+  const r = await deleteFavorites(ids);
+  // 记录过的一并清掉，避免 /del 指向已删除的 resId
+  const alive = new Set((await favList()).map(x => x.resId));
+  let dropped = 0;
+  for (const k of Object.keys(seen)) {
+    if (!seen[k] || !seen[k].resId || !alive.has(seen[k].resId)) { delete seen[k]; dropped++; }
+  }
+  if (dropped) saveJSON(SEEN_FILE, seen);
+  return Object.assign({ status: 'deleted', total: ids.length }, r);
+}
+
 // ---------------- 交互 ----------------
+let deleteAllArmedAt = 0;
 function helpText() {
   return [
     'TG → QQ 收藏表情',
@@ -302,6 +333,7 @@ function helpText() {
     'QQ 只认 GIF 的帧延时，APNG 会被按固定短间隔播放（变快），所以动态贴纸一律转 GIF 50fps',
     '',
     '/count  当前收藏数量',
+    '/delete_all  删除收藏里全部表情（需再发 /delete_all confirm 确认，60 秒内有效）',
     '/del    删掉最近存进去的一张',
     '/id     看自己的 TG id',
     '/help',
@@ -499,6 +531,23 @@ async function onMessage(tg, msg) {
     if (cmd === '/start' || cmd === '/help') return void await reply(helpText());
     if (cmd === '/id') return void await reply('tg user id: ' + uid);
     if (cmd === '/count') return void await reply('QQ 收藏表情总数：' + (await favList()).length);
+    if (cmd === '/delete_all' || cmd === '/deleteall') {
+      const arg = (text.split(/\s+/)[1] || '').toLowerCase();
+      if (arg !== 'confirm') {
+        const list = await favList();
+        if (!list.length) return void await reply('收藏是空的，没什么可删。');
+        deleteAllArmedAt = Date.now();
+        return void await reply('⚠️ 这会删除收藏里全部 ' + list.length + ' 张表情，且不可恢复。\n60 秒内发送 /delete_all confirm 确认，其他任何输入都会取消。');
+      }
+      if (!deleteAllArmedAt || Date.now() - deleteAllArmedAt > 60000) {
+        return void await reply('确认已过期或未发起。请先发送 /delete_all，再发 /delete_all confirm。');
+      }
+      deleteAllArmedAt = 0;
+      const r = await deleteAllFavorites();
+      if (r.status === 'empty') return void await reply('收藏是空的。');
+      const failLine = r.failed.length ? '\n失败：' + r.failed.slice(0, 3).join('；') : '';
+      return void await reply('已删除 ' + r.deleted + '/' + r.total + ' 张，剩余 ' + r.count + ' 张。' + failLine);
+    }
     if (cmd === '/del') {
       const t = await deleteNewest();
       if (t.status === 'empty') return void await reply('收藏是空的。');
@@ -549,4 +598,4 @@ process.on('SIGINT', () => process.exit(0));
 const invokedDirectly = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname);
 if (invokedDirectly) main();
 
-export { webmToApng, tgsToApng, webmToGif, tgsToGif, toPng, evalAdd, favList, deleteNewest, makeTG, md5hex, saveSticker, savePack, saveOne, formatOne, setDesc };
+export { webmToApng, tgsToApng, webmToGif, tgsToGif, toPng, evalAdd, favList, deleteNewest, deleteFavorites, deleteAllFavorites, makeTG, md5hex, saveSticker, savePack, saveOne, formatOne, setDesc };

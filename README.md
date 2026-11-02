@@ -103,6 +103,7 @@ journalctl -u tgqq -f
 | 回复贴纸发 `/group` 或 `/pack` | 导入它所在的整个表情包 |
 | `/count` | 当前收藏数量 |
 | `/del` | 删除最近由本 bot 添加的一张（不会动其他收藏） |
+| `/delete_all` | 清空收藏里的**全部**表情；需在 60 秒内再发 `/delete_all confirm` 确认，不可恢复 |
 | `/id` | 查看自己的 TG id |
 | `/help` | 用法 |
 
