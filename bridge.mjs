@@ -617,6 +617,28 @@ async function onMessage(tg, msg) {
   }
 }
 
+// ---------------- Telegram 命令菜单 ----------------
+// Telegram 客户端的 "/" 菜单来自 setMyCommands，不是从消息内容推断的；
+// 不注册的话命令照样能用，但聊天界面里看不到列表。
+const TG_COMMANDS = [
+  { command: 'single', description: '单张模式：之后发贴纸只存这一张' },
+  { command: 'group', description: '整包模式：发贴纸导入整包，可跟 t.me/addstickers/包名' },
+  { command: 'count', description: '查看收藏表情总数和当前模式' },
+  { command: 'del', description: '删除最新添加的那一张收藏' },
+  { command: 'delete_all', description: '清空收藏（需再发 confirm 确认）' },
+  { command: 'id', description: '查看你的 Telegram user id' },
+  { command: 'help', description: '显示完整用法说明' },
+];
+
+async function registerTelegramCommands(tg) {
+  try {
+    await tg.api('setMyCommands', { commands: TG_COMMANDS });
+    log('[tg] 命令菜单已注册（' + TG_COMMANDS.length + ' 条）');
+  } catch (e) {
+    log('[tg] 命令菜单注册失败：' + e.message);
+  }
+}
+
 // ---------------- 主循环 ----------------
 async function main() {
   const token = readToken();
@@ -626,6 +648,7 @@ async function main() {
   try { me = await tg.api('getMe', {}); }
   catch (e) { log('[fatal] getMe 失败：' + e.message); process.exit(1); }
   log('[tg] bot @' + me.username + ' (' + me.id + ') 就绪，模式=只存收藏');
+  await registerTelegramCommands(tg);
   await ob.connect().catch(e => log('[onebot] 连接失败：' + e.message));
 
   let backoff = 1000;
