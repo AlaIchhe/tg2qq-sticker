@@ -69,7 +69,7 @@ const FAV_HOST_DIR = cfg.favHostDir;
 const FAV_CONTAINER_DIR = cfg.favContainerDir;
 const VENV_PY = cfg.lottiePython;
 const state = Object.assign({ offset: 0 }, loadJSON(STATE_FILE, {}));
-let stickerMode = cfg.mode === 'group' ? 'group' : 'single';
+let stickerMode = ['group', 'send'].includes(cfg.mode) ? cfg.mode : 'single';
 const seen = loadJSON(SEEN_FILE, {});
 
 let chain = Promise.resolve();
@@ -345,14 +345,16 @@ function helpText() {
     '  动态 .tgs   → rlottie 渲染成 GIF（保留透明）',
     '相同内容只会存一份，重复发会被识别出来。',
     '',
-    '模式：',
+    '模式（会记住，直到下次切换）：',
     '  /single → 之后发贴纸，只存这一张（默认）',
     '  /group  → 之后发贴纸，自动导入它所在的整个表情包',
     '  /group t.me/addstickers/包名 → 立即导入指定包（同时切到 group）',
+    '  /send <QQ号> → 之后发贴纸，全部转发给这个好友，不写收藏',
     '（single / group 不带斜杠也认）',
     '',
     'QQ 只认 GIF 的帧延时，APNG 会被按固定短间隔播放（变快），所以动态贴纸一律转 GIF 50fps',
     '',
+    '/send <QQ号>  切到 send 模式：之后每张贴纸都转发给该好友（不写收藏）',
     '/count  当前收藏数量',
     '/delete_all  删除收藏里全部表情（需再发 /delete_all confirm 确认，60 秒内有效）',
     '/del    删掉最近存进去的一张',
@@ -386,7 +388,7 @@ async function buildDesc(tg, st) {
   return parts.join(' ').trim();
 }
 
-async function saveOne(tg, st) {
+async function renderSticker(tg, st) {
   const kind = st.is_video ? 'webm' : st.is_animated ? 'tgs' : 'webp';
   if ((st.file_size || 0) > 10 * 1024 * 1024) throw new Error('文件超过 10MB');
 
@@ -411,18 +413,47 @@ async function saveOne(tg, st) {
       if (wantGif) { await webmToGif(inPath, dynPath); fmt = 'GIF 动态'; }
       else { await webmToApng(inPath, dynPath); fmt = 'APNG 动态'; }
     } else {
-      await toPng(inPath, dynPath); fmt = 'PNG 静态';
+      // 静态贴纸一律输出真 PNG：ffmpeg 按输出扩展名选编码器，
+      // 若沿用它会因 dynPath 以 .gif 结尾而写成 GIF（GIF 只有 1-bit 透明，
+      // 半透明像素会被抹平），随后又按 .png 发送 —— 之前半透明丢失就是这个。
+      await toPng(inPath, outPath); fmt = 'PNG 静态';
       outExt = 'png';
     }
-    outBuf = fs.readFileSync(dynPath);
+    outBuf = fs.readFileSync(outExt === 'png' ? outPath : dynPath);
     outExt = outExt || dynExt;
   } finally {
     for (const p of [inPath, outPath, dynPath]) { try { fs.unlinkSync(p); } catch {} }
   }
 
+  return { buf: outBuf, ext: outExt, fmt };
+}
+
+async function saveOne(tg, st) {
+  const { buf, ext, fmt } = await renderSticker(tg, st);
   const desc = await buildDesc(tg, st);
-  const r = await evalAdd(outBuf, outExt, fmt, desc);
-  return Object.assign({}, r, { fmt, bytes: outBuf.length, desc });
+  const r = await evalAdd(buf, ext, fmt, desc);
+  return Object.assign({}, r, { fmt, bytes: buf.length, desc });
+}
+
+// 单张转发给好友：只发图片消息，不碰收藏。
+// QQ 的"表情"消息（mface）只认商店表情的 emoji_package_id/emoji_id/key，
+// 收藏表情的 emoId 恒为 0，所以只能以图片形式发出（透明 GIF 在聊天里就是动图）。
+async function sendStickerToFriend(tg, st, uin) {
+  const { buf, ext, fmt } = await renderSticker(tg, st);
+  fs.mkdirSync(FAV_HOST_DIR, { recursive: true });
+  const name = 'tgsend_' + Date.now() + '_' + crypto.randomBytes(3).toString('hex') + '.' + ext;
+  const hostPath = path.join(FAV_HOST_DIR, name);
+  fs.writeFileSync(hostPath, buf);
+  try {
+    const r = await ob.call('send_private_msg', {
+      user_id: Number(uin),
+      message: [{ type: 'image', data: { file: FAV_CONTAINER_DIR + '/' + name } }],
+    }, 60000);
+    if (r.retcode !== 0) throw new Error('retcode=' + r.retcode + ' ' + (r.message || r.wording || ''));
+    return { status: 'sent', fmt, bytes: buf.length, messageId: r.data && r.data.message_id };
+  } finally {
+    try { fs.unlinkSync(hostPath); } catch {}
+  }
 }
 
 function formatOne(r) {
@@ -537,6 +568,20 @@ async function onMessage(tg, msg) {
 
   try {
     if (msg.sticker) {
+      if (stickerMode === 'send') {
+        const target = String(cfg.sendTo || '');
+        if (!/^\d{5,12}$/.test(target)) {
+          return void await reply('send 模式还没设目标好友。发 /send <好友QQ号> 设一个，或者 /single 切回收藏模式。');
+        }
+        return void await serialize(async () => {
+          try {
+            const r = await sendStickerToFriend(tg, msg.sticker, target);
+            return void await reply('已转发给 ' + target + '：' + r.fmt + '，' + (r.bytes / 1024).toFixed(0) + 'KB');
+          } catch (e) {
+            return void await reply('转发失败：' + e.message + '\n（对方不是好友、或设置了不接受私聊）');
+          }
+        });
+      }
       if (stickerMode === 'group') {
         if (!msg.sticker.set_name) {
           return void await reply('当前是 group 模式，但这张贴纸不在公开表情包里（自定义表情没有 set_name），导不了整包。\n发 /single 切回单张模式。');
@@ -581,10 +626,34 @@ async function onMessage(tg, msg) {
       ].join('\n'));
     }
 
+    if (cmd === '/send') {
+      const arg = (text.split(/\s+/)[1] || '').trim();
+      if (arg && !/^\d{5,12}$/.test(arg)) {
+        return void await reply('用法：/send <好友QQ号> —— 之后你发的每张贴纸都会转发给对方，直到 /single 或 /group 切回来。');
+      }
+      if (arg) {
+        cfg.sendTo = arg;
+        setMode('send');
+        return void await reply([
+          '✅ 已切到 send 模式，目标好友：' + arg,
+          '之后你发任意一张贴纸，我都会把它转发给这个好友（**不写收藏**）。',
+          '换目标：/send <另一个QQ号>',
+          '切回收藏：/single 或 /group',
+        ].join('\n'));
+      }
+      if (cfg.sendTo) {
+        setMode('send');
+        return void await reply('✅ 已切到 send 模式，目标好友：' + cfg.sendTo + '（上次用的目标）\n发贴纸即转发；换目标 /send <QQ号>，切回收藏 /single 或 /group。');
+      }
+      return void await reply('用法：/send <好友QQ号>\n设置后，你发的每张贴纸都会转发给该好友，直到 /single 或 /group 切回收藏模式。');
+    }
+
     if (cmd === '/start' || cmd === '/help') return void await reply(helpText());
     if (cmd === '/id') return void await reply('tg user id: ' + uid);
     if (cmd === '/count') {
-      const modeText = stickerMode === 'group' ? 'group（发贴纸自动导入整包）' : 'single（发贴纸只存单张）';
+      const modeText = stickerMode === 'group' ? 'group（发贴纸自动导入整包）'
+        : stickerMode === 'send' ? 'send（发贴纸转发给 ' + (cfg.sendTo || '?') + '，不写收藏）'
+        : 'single（发贴纸只存单张）';
       return void await reply('QQ 收藏表情总数：' + (await favList()).length + '\n当前模式：' + modeText);
     }
     if (cmd === '/delete_all' || cmd === '/deleteall') {
@@ -623,6 +692,7 @@ async function onMessage(tg, msg) {
 const TG_COMMANDS = [
   { command: 'single', description: '单张模式：之后发贴纸只存这一张' },
   { command: 'group', description: '整包模式：发贴纸导入整包，可跟 t.me/addstickers/包名' },
+  { command: 'send', description: 'send 模式：之后发的贴纸都转发给指定好友' },
   { command: 'count', description: '查看收藏表情总数和当前模式' },
   { command: 'del', description: '删除最新添加的那一张收藏' },
   { command: 'delete_all', description: '清空收藏（需再发 confirm 确认）' },
