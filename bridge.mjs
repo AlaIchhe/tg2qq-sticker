@@ -69,7 +69,7 @@ const FAV_HOST_DIR = cfg.favHostDir;
 const FAV_CONTAINER_DIR = cfg.favContainerDir;
 const VENV_PY = cfg.lottiePython;
 const state = Object.assign({ offset: 0 }, loadJSON(STATE_FILE, {}));
-let stickerMode = ['group', 'send'].includes(cfg.mode) ? cfg.mode : 'single';
+let stickerMode = ['group', 'send', 'zip'].includes(cfg.mode) ? cfg.mode : 'single';
 const seen = loadJSON(SEEN_FILE, {});
 
 let chain = Promise.resolve();
@@ -153,13 +153,24 @@ function makeTG(token) {
       if (!r.ok) throw new Error('download ' + r.status);
       return Buffer.from(await r.arrayBuffer());
     },
+    // multipart 上传（Bot API 只接受 multipart 发文件，raw() 的 JSON 通道不行）
+    sendDocument: async (chat_id, filePath, caption) => {
+      const form = new FormData();
+      form.append('chat_id', String(chat_id));
+      if (caption) form.append('caption', caption);
+      form.append('document', new Blob([fs.readFileSync(filePath)]), path.basename(filePath));
+      const r = await fetch(base + '/sendDocument', { method: 'POST', body: form, signal: AbortSignal.timeout(600000) });
+      const j = await r.json().catch(() => ({ ok: false, description: 'bad json' }));
+      if (!j.ok) throw new Error('sendDocument: ' + (j.description || JSON.stringify(j)));
+      return j.result;
+    },
   };
 }
 
 // ---------------- ffmpeg ----------------
-function run(cmd, args, timeoutMs = 120000) {
+function run(cmd, args, timeoutMs = 120000, cwd = undefined) {
   return new Promise((resolve, reject) => {
-    const p = spawn(cmd, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    const p = spawn(cmd, args, { cwd, stdio: ['ignore', 'ignore', 'pipe'] });
     let err = '';
     p.stderr.on('data', d => { err += d.toString(); });
     const to = setTimeout(() => { p.kill('SIGKILL'); reject(new Error(cmd + ' timeout')); }, timeoutMs);
@@ -350,11 +361,13 @@ function helpText() {
     '  /group  → 之后发贴纸，自动导入它所在的整个表情包',
     '  /group t.me/addstickers/包名 → 立即导入指定包（同时切到 group）',
     '  /send <QQ号> → 之后发贴纸，全部转发给这个好友，不写收藏',
+    '  /zip → 之后发贴纸，把整包转换后打成一个 zip 发回来（不写收藏）',
     '（single / group 不带斜杠也认）',
     '',
     'QQ 只认 GIF 的帧延时，APNG 会被按固定短间隔播放（变快），所以动态贴纸一律转 GIF 50fps',
     '',
     '/send <QQ号>  切到 send 模式：之后每张贴纸都转发给该好友（不写收藏）',
+    '/zip  切到 zip 模式：之后发一张贴纸，把它所在整包转成 zip 发回来',
     '/count  当前收藏数量',
     '/delete_all  删除收藏里全部表情（需再发 /delete_all confirm 确认，60 秒内有效）',
     '/del    删掉最近存进去的一张',
@@ -508,6 +521,73 @@ async function savePack(tg, setName, reply) {
   return reply('完成：「' + set.title + '」\n新增 ' + added + ' 张，跳过 ' + exists + ' 张，失败 ' + failed.length + ' 张' + failLine + '\n当前收藏总数：' + total);
 }
 
+function safeName(s) {
+  return String(s || '').replace(/[\\/:*?"<>|\u0000-\u001f]/g, '').replace(/\s+/g, ' ').trim().slice(0, 24);
+}
+
+// 整包打包：沿用 renderSticker 的格式映射（静态 webp→PNG，动态 webm/tgs→GIF），
+// 逐张转换后塞进一个 zip，再用 sendDocument 发回来。
+async function packZip(tg, setName, reply) {
+  const set = await tg.api('getStickerSet', { name: setName });
+  const list = set.stickers || [];
+  log('[zip] set', setName, 'title=', set.title || '?', 'count=', list.length);
+  if (!list.length) return reply('这个表情包里没有贴纸。');
+
+  const status = await reply('开始转换「' + set.title + '」，共 ' + list.length + ' 张…\n（动态贴纸逐张渲染，可能要几分钟）');
+  const mid = status && status.message_id;
+  const chatId = status && status.chat && status.chat.id;
+
+  fs.mkdirSync(TMP, { recursive: true });
+  const dir = fs.mkdtempSync(path.join(TMP, 'zip_'));
+  const manifest = ['set: ' + set.name, 'title: ' + set.title, 'count: ' + list.length, ''];
+  const failed = [];
+  const files = [];
+  let ok = 0;
+  let lastEdit = 0;
+  let zipPath = null;
+  try {
+    for (let i = 0; i < list.length; i++) {
+      const st = list[i];
+      try {
+        const { buf, ext, fmt } = await renderSticker(tg, st);
+        const name = String(i + 1).padStart(3, '0') + (st.emoji ? '_' + safeName(st.emoji) : '') + '.' + ext;
+        fs.writeFileSync(path.join(dir, name), buf);
+        files.push(name);
+        manifest.push(name + '\t' + fmt + '\t' + (st.emoji || '') + '\t' + buf.length + ' bytes');
+        ok++;
+      } catch (e) {
+        failed.push((i + 1) + ': ' + String(e.message).slice(0, 80));
+        log('[zip] item fail', i, e.message);
+      }
+      const now = Date.now();
+      if (mid && chatId && (now - lastEdit > 4000 || i === list.length - 1)) {
+        lastEdit = now;
+        await tg.api('editMessageText', {
+          chat_id: chatId, message_id: mid,
+          text: '转换中 ' + (i + 1) + '/' + list.length + '：成功 ' + ok + '，失败 ' + failed.length,
+        }).catch(() => {});
+      }
+    }
+    if (!files.length) {
+      return reply('「' + set.title + '」一张都没转换成功。\n' + failed.slice(0, 5).join('\n'));
+    }
+    fs.writeFileSync(path.join(dir, 'manifest.txt'), manifest.join('\n') + '\n');
+    zipPath = path.join(TMP, 'pack_' + Date.now() + '.zip');
+    await run('zip', ['-q', '-9', zipPath, ...files, 'manifest.txt'], 600000, dir);
+    const size = fs.statSync(zipPath).size;
+    if (size > 48 * 1048576) {
+      return reply('转换完成，但压缩包 ' + (size / 1048576).toFixed(1) + 'MB，超过 Bot API 的 50MB 上限，发不出去。\n（可以改用 /group 直接导入收藏，或者告诉我按分包发。）');
+    }
+    const cap = '「' + set.title + '」共 ' + list.length + ' 张：成功 ' + ok + '，失败 ' + failed.length + '\n' + (size / 1048576).toFixed(2) + 'MB';
+    await tg.sendDocument(chatId, zipPath, cap);
+    log('[zip] sent', setName, size);
+    return null;
+  } finally {
+    try { if (zipPath) fs.unlinkSync(zipPath); } catch {}
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 async function saveImage(tg, msg, reply) {
   let fileId, suggested;
   if (msg.photo && msg.photo.length) fileId = msg.photo[msg.photo.length - 1].file_id;
@@ -563,7 +643,7 @@ async function onMessage(tg, msg) {
   let cmd = text.startsWith('/') ? text.split(/\s+/)[0].toLowerCase().replace(/@.*$/, '') : '';
   if (!cmd) {
     const bare = text.toLowerCase();
-    if (['single', 'group', 'pack', 'count', 'del', 'help', 'id', 'start'].includes(bare)) cmd = '/' + bare;
+    if (['single', 'group', 'pack', 'zip', 'count', 'del', 'help', 'id', 'start'].includes(bare)) cmd = '/' + bare;
   }
 
   try {
@@ -581,6 +661,12 @@ async function onMessage(tg, msg) {
             return void await reply('转发失败：' + e.message + '\n（对方不是好友、或设置了不接受私聊）');
           }
         });
+      }
+      if (stickerMode === 'zip') {
+        if (!msg.sticker.set_name) {
+          return void await reply('当前是 zip 模式，但这张贴纸不在公开表情包里（自定义表情没有 set_name），打不了包。\n发 /single 切回单张模式。');
+        }
+        return void await serialize(() => packZip(tg, msg.sticker.set_name, reply));
       }
       if (stickerMode === 'group') {
         if (!msg.sticker.set_name) {
@@ -648,11 +734,25 @@ async function onMessage(tg, msg) {
       return void await reply('用法：/send <好友QQ号>\n设置后，你发的每张贴纸都会转发给该好友，直到 /single 或 /group 切回收藏模式。');
     }
 
+    if (cmd === '/zip') {
+      setMode('zip');
+      const argName = parsePackArg(text) || (repliedSticker && repliedSticker.set_name) || '';
+      if (argName) return void await serialize(() => packZip(tg, argName, reply));
+      return void await reply([
+        '✅ 已切到 zip 模式',
+        '之后你发任意一张贴纸，我会把它所在的整个表情包按统一格式转换，打成一个 zip 发回来：',
+        '  静态 .webp → PNG，动态 .webm/.tgs → GIF 240×240 50fps（保留透明）',
+        '也可以直接点名：/zip t.me/addstickers/包名',
+        '切回单张：/single',
+      ].join('\n'));
+    }
+
     if (cmd === '/start' || cmd === '/help') return void await reply(helpText());
     if (cmd === '/id') return void await reply('tg user id: ' + uid);
     if (cmd === '/count') {
       const modeText = stickerMode === 'group' ? 'group（发贴纸自动导入整包）'
         : stickerMode === 'send' ? 'send（发贴纸转发给 ' + (cfg.sendTo || '?') + '，不写收藏）'
+        : stickerMode === 'zip' ? 'zip（发贴纸把整包打成 zip 发回）'
         : 'single（发贴纸只存单张）';
       return void await reply('QQ 收藏表情总数：' + (await favList()).length + '\n当前模式：' + modeText);
     }
@@ -693,6 +793,7 @@ const TG_COMMANDS = [
   { command: 'single', description: '单张模式：之后发贴纸只存这一张' },
   { command: 'group', description: '整包模式：发贴纸导入整包，可跟 t.me/addstickers/包名' },
   { command: 'send', description: 'send 模式：之后发的贴纸都转发给指定好友' },
+  { command: 'zip', description: 'zip 模式：发一张贴纸，得到它所在整包的压缩包' },
   { command: 'count', description: '查看收藏表情总数和当前模式' },
   { command: 'del', description: '删除最新添加的那一张收藏' },
   { command: 'delete_all', description: '清空收藏（需再发 confirm 确认）' },
@@ -747,4 +848,4 @@ process.on('SIGINT', () => process.exit(0));
 const invokedDirectly = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname);
 if (invokedDirectly) main();
 
-export { webmToApng, tgsToApng, webmToGif, tgsToGif, toPng, evalAdd, favList, deleteNewest, deleteFavorites, deleteAllFavorites, makeTG, md5hex, saveSticker, savePack, saveOne, formatOne, setDesc, parsePackArg };
+export { webmToApng, tgsToApng, webmToGif, tgsToGif, toPng, evalAdd, favList, deleteNewest, deleteFavorites, deleteAllFavorites, makeTG, md5hex, saveSticker, savePack, saveOne, formatOne, setDesc, parsePackArg, packZip, renderSticker };
