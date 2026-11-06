@@ -848,4 +848,4 @@ process.on('SIGINT', () => process.exit(0));
 const invokedDirectly = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname);
 if (invokedDirectly) main();
 
-export { webmToApng, tgsToApng, webmToGif, tgsToGif, toPng, evalAdd, favList, deleteNewest, deleteFavorites, deleteAllFavorites, makeTG, md5hex, saveSticker, savePack, saveOne, formatOne, setDesc, parsePackArg, packZip, renderSticker };
+export { webmToApng, tgsToApng, webmToGif, tgsToGif, toPng, evalAdd, favList, deleteNewest, deleteFavorites, deleteAllFavorites, makeTG, md5hex, saveSticker, savePack, saveOne, formatOne, setDesc, parsePackArg, packZip, renderSticker, onMessage };
