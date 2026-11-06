@@ -117,7 +117,7 @@ journalctl -u tgqq -f
 
 - `.tgs` 需要逐帧渲染，单张约 1~3 秒；50fps 下整包导入会比较慢
 - `/zip` 的 zip 里每张按原格式转换：静态 `.webp` → PNG（保留原分辨率、alpha），动态 `.webm`/`.tgs` → GIF 240×240 50fps；34 张动态包约 10 分钟、约 38MB
-- Bot API 上传文档上限 50MB；超过会明确提示发不出去（可改用 `/group` 入库）
+- Bot API 上传文档上限 50MB；总量超过 45MB 时自动按卷拆分，一条请求可能收到多个 zip（标题带「分卷 i/n」）
 - `/zip` 依赖系统里的 `zip` 命令（`apt install zip`）
 - GIF 只有 1 位透明，抗锯齿边缘会比 APNG 硬
 - QQ 单张收藏大小上限、收藏总数上限均未知（实测 3.8MB 的文件可以存）

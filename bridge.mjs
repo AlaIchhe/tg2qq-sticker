@@ -538,23 +538,20 @@ async function packZip(tg, setName, reply) {
   const chatId = status && status.chat && status.chat.id;
 
   fs.mkdirSync(TMP, { recursive: true });
-  const dir = fs.mkdtempSync(path.join(TMP, 'zip_'));
-  const manifest = ['set: ' + set.name, 'title: ' + set.title, 'count: ' + list.length, ''];
+  const dir = fs.mkdtempSync(path.join(TMP, 'qpack_'));
+  const entries = [];
   const failed = [];
-  const files = [];
-  let ok = 0;
+  const zips = [];
   let lastEdit = 0;
-  let zipPath = null;
   try {
     for (let i = 0; i < list.length; i++) {
       const st = list[i];
+      if (!fs.existsSync(dir)) throw new Error('临时目录被外部删除了（检查是否有人清理 ' + TMP + '）');
       try {
         const { buf, ext, fmt } = await renderSticker(tg, st);
         const name = String(i + 1).padStart(3, '0') + (st.emoji ? '_' + safeName(st.emoji) : '') + '.' + ext;
         fs.writeFileSync(path.join(dir, name), buf);
-        files.push(name);
-        manifest.push(name + '\t' + fmt + '\t' + (st.emoji || '') + '\t' + buf.length + ' bytes');
-        ok++;
+        entries.push({ name, fmt, emoji: st.emoji || '', bytes: buf.length });
       } catch (e) {
         failed.push((i + 1) + ': ' + String(e.message).slice(0, 80));
         log('[zip] item fail', i, e.message);
@@ -564,26 +561,50 @@ async function packZip(tg, setName, reply) {
         lastEdit = now;
         await tg.api('editMessageText', {
           chat_id: chatId, message_id: mid,
-          text: '转换中 ' + (i + 1) + '/' + list.length + '：成功 ' + ok + '，失败 ' + failed.length,
+          text: '转换中 ' + (i + 1) + '/' + list.length + '：成功 ' + entries.length + '，失败 ' + failed.length,
         }).catch(() => {});
       }
     }
-    if (!files.length) {
+    if (!entries.length) {
       return reply('「' + set.title + '」一张都没转换成功。\n' + failed.slice(0, 5).join('\n'));
     }
-    fs.writeFileSync(path.join(dir, 'manifest.txt'), manifest.join('\n') + '\n');
-    zipPath = path.join(TMP, 'pack_' + Date.now() + '.zip');
-    await run('zip', ['-q', '-9', zipPath, ...files, 'manifest.txt'], 600000, dir);
-    const size = fs.statSync(zipPath).size;
-    if (size > 48 * 1048576) {
-      return reply('转换完成，但压缩包 ' + (size / 1048576).toFixed(1) + 'MB，超过 Bot API 的 50MB 上限，发不出去。\n（可以改用 /group 直接导入收藏，或者告诉我按分包发。）');
+
+    // Bot API 上传文档上限 50MB，按 45MB 分卷（TG_ZIP_PART_MB 可覆盖，便于测试）
+    const PART_LIMIT = (Number(process.env.TG_ZIP_PART_MB) || 45) * 1048576;
+    const parts = [];
+    let cur = [], curSize = 0;
+    for (const e of entries) {
+      if (cur.length && curSize + e.bytes > PART_LIMIT) { parts.push(cur); cur = []; curSize = 0; }
+      cur.push(e); curSize += e.bytes;
     }
-    const cap = '「' + set.title + '」共 ' + list.length + ' 张：成功 ' + ok + '，失败 ' + failed.length + '\n' + (size / 1048576).toFixed(2) + 'MB';
-    await tg.sendDocument(chatId, zipPath, cap);
-    log('[zip] sent', setName, size);
+    if (cur.length) parts.push(cur);
+
+    for (let p = 0; p < parts.length; p++) {
+      const part = parts[p];
+      const multi = parts.length > 1;
+      const mf = multi ? 'manifest-part' + (p + 1) + '.txt' : 'manifest.txt';
+      const manifest = [
+        'set: ' + set.name,
+        'title: ' + set.title,
+        'count: ' + list.length,
+        ...(multi ? ['part: ' + (p + 1) + '/' + parts.length] : []),
+        '',
+        ...part.map(e => [e.name, e.fmt, e.emoji, e.bytes + ' bytes'].join('\t')),
+      ].join('\n') + '\n';
+      fs.writeFileSync(path.join(dir, mf), manifest);
+      const zipPath = path.join(TMP, 'pack_' + Date.now() + '_' + (p + 1) + '.zip');
+      zips.push(zipPath);
+      await run('zip', ['-q', '-9', zipPath, ...part.map(e => e.name), mf], 900000, dir);
+      const size = fs.statSync(zipPath).size;
+      const cap = '「' + set.title + '」' + (multi ? '分卷 ' + (p + 1) + '/' + parts.length + ' · ' : '') +
+        '共 ' + list.length + ' 张，成功 ' + entries.length + '，失败 ' + failed.length + ' · ' +
+        (size / 1048576).toFixed(2) + 'MB';
+      await tg.sendDocument(chatId, zipPath, cap);
+      log('[zip] sent part', p + 1, '/', parts.length, size);
+    }
     return null;
   } finally {
-    try { if (zipPath) fs.unlinkSync(zipPath); } catch {}
+    for (const z of zips) { try { fs.unlinkSync(z); } catch {} }
     fs.rmSync(dir, { recursive: true, force: true });
   }
 }
